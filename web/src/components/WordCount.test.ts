@@ -1,4 +1,4 @@
-// client/src/components/WordCount.test.ts
+
 import { describe, it, expect } from "vitest";
 import { countWords } from "./WordCount";
 
