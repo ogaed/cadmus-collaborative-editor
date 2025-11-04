@@ -89,12 +89,4 @@ The server writes to:
 server/data/steps.json
 ```
 
----
 
-## 📦 Packaging for Submission
-
-Before archiving:
-```bash
-rm -rf node_modules dist build
-git archive --format=tar.gz -o cadmus-homework-fullstack.tar.gz main
-```
