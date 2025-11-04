@@ -1,0 +1,47 @@
+# Node modules
+node_modules/
+
+# Build and dist folders
+dist/
+build/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+
+# Package manager lockfiles (optional)
+# package-lock.json
+# yarn.lock
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Generated archives
+*.tar.gz
+
+# Local JSON persistence (steps)
+server/data/steps.json
