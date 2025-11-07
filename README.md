@@ -7,7 +7,7 @@ It implements a **collaborative rich-text editor** built with React (TipTap + Pr
 
 ## 🎥 Demo Video
 
-https://github.com/ogaed/cadmus-collaborative-editor/blob/main/demo.mp4?raw=true
+[![Watch the demo](https://img.shields.io/badge/WATCH_DEMO-▶️_Play_Video-blue?style=for-the-badge)](https://github.com/ogaed/cadmus-collaborative-editor/blob/main/demo.mp4?raw=true)
 
 *Real-time collaborative editing in action - the video shows two browsers syncing in real-time*
 
