@@ -1,10 +1,11 @@
-
 import type React from "react"
 import { useEffect, useRef, useState } from "react"
 import Toolbar from "../components/Toolbar"
 import WordCount from "../components/WordCount"
 import { saveDocumentWithRetry } from "../utils/saveWithRetry"
 import type { QueueItem } from "../utils/saveWithRetry"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 const API_BASE = "http://localhost:4000"
 
@@ -39,13 +40,16 @@ export default function Editor() {
     }
   })
   const [isConnected, setIsConnected] = useState<boolean>(false)
+  const [isUserTyping, setIsUserTyping] = useState<boolean>(false)
+  const [showPreview, setShowPreview] = useState<boolean>(false) // Toggle between edit and preview
 
   const debounceTimer = useRef<number | null>(null)
   const textRef = useRef<HTMLTextAreaElement | null>(null)
-  const editorRef = useRef<HTMLDivElement | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const isApplyingRemoteUpdate = useRef<boolean>(false)
+  const lastUserActivityRef = useRef<number>(Date.now())
 
+  // Real-time updates with Server-Sent Events
   useEffect(() => {
     const setupEventSource = () => {
       try {
@@ -62,17 +66,29 @@ export default function Editor() {
             const data = JSON.parse(event.data);
             
             if (data.type === 'content_update' || data.type === 'connected') {
-              if (isApplyingRemoteUpdate.current) return;
+              const now = Date.now();
+              const timeSinceLastActivity = now - lastUserActivityRef.current;
+              
+              if (isApplyingRemoteUpdate.current || 
+                  isUserTyping || 
+                  timeSinceLastActivity < 2000 || 
+                  document.activeElement === textRef.current ||
+                  pendingQueue.length > 0) {
+                console.log('Skipping remote update - user is active');
+                return;
+              }
               
               console.log('Received remote update:', data);
               
-              if (data.content !== text && pendingQueue.length === 0) {
+              if (data.content !== text) {
+                isApplyingRemoteUpdate.current = true;
                 setText(data.content);
                 setServerVersion(data.version);
                 setStatusMessage("Updated from another user");
                 
                 setTimeout(() => {
                   setStatusMessage("All changes synced");
+                  isApplyingRemoteUpdate.current = false;
                 }, 2000);
               }
             }
@@ -107,7 +123,7 @@ export default function Editor() {
         eventSourceRef.current.close();
       }
     };
-  }, [text, pendingQueue.length]);
+  }, [text, pendingQueue.length, isUserTyping]);
 
   // Load remote document on mount
   useEffect(() => {
@@ -147,6 +163,7 @@ export default function Editor() {
     } catch {}
   }, [text])
 
+  // Background flush loop to send pending queue items
   useEffect(() => {
     let stopped = false
 
@@ -202,57 +219,68 @@ export default function Editor() {
   function onUserEdit(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const next = e.target.value
     setText(next)
+    
+    setIsUserTyping(true)
+    lastUserActivityRef.current = Date.now()
 
     if (debounceTimer.current) window.clearTimeout(debounceTimer.current)
     debounceTimer.current = window.setTimeout(() => {
       enqueueChange(next)
       debounceTimer.current = null
+      setIsUserTyping(false)
     }, 450)
   }
 
-  function applyFormatting(format: 'bold' | 'italic') {
-    const editor = editorRef.current
-    if (!editor) return
-
-    const selection = window.getSelection()
-    if (!selection || selection.rangeCount === 0) return
-
-    const range = selection.getRangeAt(0)
-    const selectedText = range.toString()
+  const handleTextareaInteraction = () => {
+    lastUserActivityRef.current = Date.now();
+    setIsUserTyping(true);
     
-    if (selectedText) {
-      const span = document.createElement('span')
-      
-      if (format === 'bold') {
-        span.style.fontWeight = 'bold'
-      } else if (format === 'italic') {
-        span.style.fontStyle = 'italic'
+    setTimeout(() => {
+      if (!isUserTyping) {
+        setIsUserTyping(false);
       }
-      
-      span.textContent = selectedText
-      range.deleteContents()
-      range.insertNode(span)
-      
-      const newContent = editor.innerHTML
-      setText(newContent)
-      enqueueChange(newContent)
-    } else {
-      const marker = format === 'bold' ? '**BOLD**' : '*ITALIC*'
-      const textNode = document.createTextNode(marker)
-      range.deleteContents()
-      range.insertNode(textNode)
-      
-      range.setStartAfter(textNode)
-      range.setEndAfter(textNode)
-      selection.removeAllRanges()
-      selection.addRange(range)
-      
-      const newContent = editor.innerHTML
-      setText(newContent)
-      enqueueChange(newContent)
-    }
+    }, 1000);
+  };
+
+  // Improved toolbar actions with better selection handling
+  function applyWrap(prefix: string, suffix?: string) {
+    const textarea = textRef.current
+    if (!textarea) return
+
+    const start = textarea.selectionStart
+    const end = textarea.selectionEnd
+    const hasSelection = start !== end
     
-    editor.focus()
+    const currentText = text
+    const wrapSuffix = suffix ?? prefix
+    
+    let newText: string
+    let newCursorPos: number
+
+    if (hasSelection) {
+      const selectedText = currentText.slice(start, end)
+      newText = currentText.slice(0, start) + prefix + selectedText + wrapSuffix + currentText.slice(end)
+      newCursorPos = end + prefix.length + wrapSuffix.length
+    } else {
+      newText = currentText.slice(0, start) + prefix + wrapSuffix + currentText.slice(end)
+      newCursorPos = start + prefix.length
+    }
+
+    setText(newText)
+    setIsUserTyping(true)
+    lastUserActivityRef.current = Date.now()
+
+    if (debounceTimer.current) window.clearTimeout(debounceTimer.current)
+    enqueueChange(newText)
+
+    // Restore cursor position after React re-render
+    setTimeout(() => {
+      if (textarea) {
+        textarea.focus()
+        textarea.setSelectionRange(newCursorPos, newCursorPos)
+        setIsUserTyping(false)
+      }
+    }, 10)
   }
 
   const unconfirmedCount = pendingQueue.length
@@ -261,7 +289,7 @@ export default function Editor() {
     <div className="p-4 sm:p-5 md:p-6 lg:p-8 max-w-4xl mx-auto min-h-screen">
       <header className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4 sm:mb-5 md:mb-6">
         <h2 className="text-xl sm:text-2xl font-semibold m-0 text-foreground">
-          📝 Cadmus — Collaborative Editor
+        Cadmus — Collaborative Editor
           <span className={`ml-2 text-sm ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
             {isConnected ? '●' : '●'} {isConnected ? 'Connected' : 'Disconnected'}
           </span>
@@ -276,49 +304,61 @@ export default function Editor() {
           {statusMessage && (
             <div className="text-xs text-muted-foreground max-w-[200px] sm:max-w-none text-left sm:text-right">
               {statusMessage}
+              {isUserTyping && " (Typing...)"}
             </div>
           )}
         </div>
       </header>
 
-      <Toolbar 
-        onBold={() => applyFormatting('bold')} 
-        onItalic={() => applyFormatting('italic')} 
-      />
-
-      <div className="border border-border rounded-lg p-3 sm:p-4 md:p-5 bg-card shadow-sm">
-        <div
-          ref={editorRef}
-          contentEditable
-          dangerouslySetInnerHTML={{ __html: text }}
-          onInput={(e) => {
-            const newContent = e.currentTarget.innerHTML
-            setText(newContent)
-            
-            if (debounceTimer.current) window.clearTimeout(debounceTimer.current)
-            debounceTimer.current = window.setTimeout(() => {
-              enqueueChange(newContent)
-              debounceTimer.current = null
-            }, 450)
-          }}
-          className="w-full min-h-[280px] sm:min-h-[380px] md:min-h-[450px] lg:min-h-[500px] border-none outline-none text-sm sm:text-base leading-relaxed font-sans resize-vertical bg-transparent text-foreground placeholder:text-muted-foreground"
-          style={{ 
-            whiteSpace: 'pre-wrap',
-            wordWrap: 'break-word'
-          }}
+      <div className="flex items-center gap-4 mb-4">
+        <Toolbar 
+          onBold={() => applyWrap("**", "**")} 
+          onItalic={() => applyWrap("*", "*")} 
         />
         
-            <textarea
-          ref={textRef}
-          value={text}
-          onChange={onUserEdit}
-          className="hidden"
-          aria-hidden="true"
-        />
+        {/* Preview Toggle */}
+        <button
+          onClick={() => setShowPreview(!showPreview)}
+          className={`px-3 py-1 text-sm border rounded ${
+            showPreview 
+              ? 'bg-blue-600 text-white border-blue-600' 
+              : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
+          }`}
+        >
+          {showPreview ? 'Edit' : 'Preview'}
+        </button>
       </div>
 
+      {showPreview ? (
+        // Preview Mode
+        <div className="border border-border rounded-lg p-3 sm:p-4 md:p-5 bg-card shadow-sm min-h-[380px]">
+          <div className="prose prose-sm max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {text}
+            </ReactMarkdown>
+          </div>
+        </div>
+      ) : (
+        // Edit Mode - Simple textarea without overlay
+        <div className="border border-border rounded-lg bg-card shadow-sm">
+          <textarea
+            ref={textRef}
+            value={text}
+            onChange={onUserEdit}
+            onFocus={handleTextareaInteraction}
+            onKeyDown={handleTextareaInteraction}
+            onMouseDown={handleTextareaInteraction}
+            placeholder="Start collaborating... (Use Preview button to see formatted Markdown)"
+            className="w-full min-h-[380px] p-3 sm:p-4 md:p-5 outline-none resize-none bg-transparent text-foreground caret-foreground border-0 font-mono text-sm leading-relaxed"
+            style={{
+              fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+            }}
+          />
+        </div>
+      )}
+
       <footer className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 sm:gap-0 mt-4 sm:mt-5 md:mt-6">
-        <WordCount text={text.replace(/<[^>]*>/g, '')} />
+        <WordCount text={text} />
         <div className="text-xs sm:text-sm text-muted-foreground">
           {pendingQueue.length > 0 ? (
             <>
