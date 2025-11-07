@@ -2,7 +2,11 @@ import React from "react";
 import Editor from "./editor/Editor";
 
 function App() {
-  return <Editor />;
+  return (
+    <div>
+      <Editor />
+    </div>
+  );
 }
 
 export default App;
