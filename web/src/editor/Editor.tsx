@@ -41,26 +41,41 @@ export default function Editor() {
   })
   const [isConnected, setIsConnected] = useState<boolean>(false)
   const [isUserTyping, setIsUserTyping] = useState<boolean>(false)
-  const [showPreview, setShowPreview] = useState<boolean>(false)
 
   const debounceTimer = useRef<number | null>(null)
   const textRef = useRef<HTMLTextAreaElement | null>(null)
+  const previewRef = useRef<HTMLDivElement | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const isApplyingRemoteUpdate = useRef<boolean>(false)
   const lastUserActivityRef = useRef<number>(Date.now())
   const reconnectAttemptsRef = useRef<number>(0)
+  const reconnectTimeoutRef = useRef<number | null>(null)
 
+  // Sync scroll between textarea and preview
+  const syncScroll = () => {
+    if (textRef.current && previewRef.current) {
+      previewRef.current.scrollTop = textRef.current.scrollTop
+    }
+  }
+
+  // Real-time updates with Server-Sent Events - FIXED VERSION
   useEffect(() => {
     const maxReconnectDelay = 10000;
 
     const setupEventSource = () => {
       try {
-        // Include clientId in the SSE URL to avoid sending updates back to sender
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+
         const clientId = localClientId();
+        console.log(`Connecting to SSE with clientId: ${clientId}`);
+        
         eventSourceRef.current = new EventSource(`${API_BASE}/collab/events?clientId=${clientId}`);
         
         eventSourceRef.current.onopen = () => {
-          console.log('SSE connection opened');
+          console.log('SSE connection opened successfully');
           setIsConnected(true);
           setStatusMessage("Connected - real-time updates active");
           reconnectAttemptsRef.current = 0;
@@ -70,35 +85,31 @@ export default function Editor() {
           try {
             const data = JSON.parse(event.data);
             
-            // Ignore heartbeat messages
             if (data.type === 'heartbeat') return;
             
             if (data.type === 'content_update' || data.type === 'connected') {
-              const now = Date.now();
-              const timeSinceLastActivity = now - lastUserActivityRef.current;
+              console.log('Received remote update - current version:', serverVersion, 'incoming version:', data.version);
               
-              // Don't apply updates if user is actively typing or we're applying changes
-              if (isApplyingRemoteUpdate.current || 
-                  isUserTyping || 
-                  timeSinceLastActivity < 1000 || 
-                  document.activeElement === textRef.current) {
-                console.log('Skipping remote update - user is active');
+              // MUCH SIMPLER LOGIC: Only block if we're literally applying a remote update right now
+              if (isApplyingRemoteUpdate.current) {
+                console.log('Skipping - currently applying another update');
                 return;
               }
               
-              console.log('Received remote update:', data);
-              
-              // Only update if the content is different and version is newer
-              if (data.content !== text && data.version >= serverVersion) {
+              // Apply update if content is different and version is newer
+              if (data.content !== text && data.version > serverVersion) {
+                console.log('Auto-applying remote update from version', serverVersion, 'to', data.version);
                 isApplyingRemoteUpdate.current = true;
                 setText(data.content);
                 setServerVersion(data.version);
-                setStatusMessage("Updated from another user");
+                setStatusMessage("Real-time update received");
                 
                 setTimeout(() => {
                   setStatusMessage("All changes synced");
                   isApplyingRemoteUpdate.current = false;
                 }, 2000);
+              } else {
+                console.log('Update skipped - same content or older version');
               }
             }
           } catch (error) {
@@ -107,22 +118,20 @@ export default function Editor() {
         };
 
         eventSourceRef.current.onerror = (error) => {
-          console.error('SSE error:', error);
+          console.error('SSE connection error');
           setIsConnected(false);
           
-          // Calculate reconnect delay with exponential backoff
           const reconnectDelay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), maxReconnectDelay);
           reconnectAttemptsRef.current++;
           
-          setStatusMessage(`Connection lost - reconnecting in ${reconnectDelay/1000}s...`);
+          setStatusMessage(`Connection lost - reconnecting in ${Math.ceil(reconnectDelay/1000)}s...`);
           
-          // Close current connection
           if (eventSourceRef.current) {
             eventSourceRef.current.close();
+            eventSourceRef.current = null;
           }
           
-          // Attempt to reconnect after delay
-          setTimeout(() => {
+          reconnectTimeoutRef.current = window.setTimeout(() => {
             setupEventSource();
           }, reconnectDelay);
         };
@@ -131,8 +140,7 @@ export default function Editor() {
         console.error('Failed to setup SSE:', error);
         setStatusMessage("Real-time updates unavailable");
         
-        // Retry connection after error
-        setTimeout(() => {
+        reconnectTimeoutRef.current = window.setTimeout(() => {
           setupEventSource();
         }, 3000);
       }
@@ -141,11 +149,14 @@ export default function Editor() {
     setupEventSource();
 
     return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }
     };
-  }, [text, serverVersion, isUserTyping]);
+  }, [text, serverVersion]); // Removed isUserTyping dependency
 
   // Load remote document on mount
   useEffect(() => {
@@ -162,6 +173,7 @@ export default function Editor() {
         }
         setServerVersion(data.version ?? 0)
         setStatusMessage("Loaded from server")
+        console.log('Loaded initial document version:', data.version)
       } catch (err) {
         setStatusMessage("Failed to load from server — working offline")
         console.warn("load error", err)
@@ -199,10 +211,12 @@ export default function Editor() {
         try {
           setStatusMessage("Syncing...")
           isApplyingRemoteUpdate.current = true;
+          console.log('Sending change to server, version:', serverVersion)
           const result = await saveDocumentWithRetry(next, serverVersion)
           setPendingQueue((q) => q.slice(1))
           setServerVersion(result.version)
-          setStatusMessage("All changes synced")
+          setStatusMessage("Changes synced to server")
+          console.log('Successfully synced to version:', result.version)
           
           const syncTime = new Date().toISOString()
           setLastSynced(syncTime)
@@ -253,15 +267,12 @@ export default function Editor() {
     }, 450)
   }
 
+  const handleTextareaScroll = () => {
+    syncScroll()
+  }
+
   const handleTextareaInteraction = () => {
     lastUserActivityRef.current = Date.now();
-    setIsUserTyping(true);
-    
-    setTimeout(() => {
-      if (!isUserTyping) {
-        setIsUserTyping(false);
-      }
-    }, 1000);
   };
 
   // Improved toolbar actions with better selection handling
@@ -295,12 +306,12 @@ export default function Editor() {
     if (debounceTimer.current) window.clearTimeout(debounceTimer.current)
     enqueueChange(newText)
 
-    // Restore cursor position after React re-render
     setTimeout(() => {
       if (textarea) {
         textarea.focus()
         textarea.setSelectionRange(newCursorPos, newCursorPos)
         setIsUserTyping(false)
+        syncScroll()
       }
     }, 10)
   }
@@ -311,7 +322,7 @@ export default function Editor() {
     <div className="p-4 sm:p-5 md:p-6 lg:p-8 max-w-4xl mx-auto min-h-screen">
       <header className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4 sm:mb-5 md:mb-6">
         <h2 className="text-xl sm:text-2xl font-semibold m-0 text-foreground">
-          Cadmus — Collaborative Editor
+         Cadmus — Collaborative Editor
           <span className={`ml-2 text-sm ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
             {isConnected ? '●' : '●'} {isConnected ? 'Connected' : 'Disconnected'}
           </span>
@@ -332,52 +343,52 @@ export default function Editor() {
         </div>
       </header>
 
-      <div className="flex items-center gap-4 mb-4">
-        <Toolbar 
-          onBold={() => applyWrap("**", "**")} 
-          onItalic={() => applyWrap("*", "*")} 
-        />
-        
-        {/* Preview Toggle */}
-        <button
-          onClick={() => setShowPreview(!showPreview)}
-          className={`px-3 py-1 text-sm border rounded ${
-            showPreview 
-              ? 'bg-blue-600 text-white border-blue-600' 
-              : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
-          }`}
-        >
-          {showPreview ? 'Edit' : 'Preview'}
-        </button>
-      </div>
+      <Toolbar 
+        onBold={() => applyWrap("**", "**")} 
+        onItalic={() => applyWrap("*", "*")} 
+      />
 
-      {showPreview ? (
-        // Preview Mode
-        <div className="border border-border rounded-lg p-3 sm:p-4 md:p-5 bg-card shadow-sm min-h-[380px]">
-          <div className="prose prose-sm max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {text}
-            </ReactMarkdown>
-          </div>
-        </div>
-      ) : (
-        // Edit Mode - Simple textarea without overlay
+      {/* Split view: Editor and Preview side by side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        {/* Editor Panel */}
         <div className="border border-border rounded-lg bg-card shadow-sm">
+          <div className="p-3 border-b border-border bg-muted/50">
+            <h3 className="text-sm font-medium">Editor</h3>
+          </div>
           <textarea
             ref={textRef}
             value={text}
             onChange={onUserEdit}
+            onScroll={handleTextareaScroll}
             onFocus={handleTextareaInteraction}
             onKeyDown={handleTextareaInteraction}
-            onMouseDown={handleTextareaInteraction}
-            placeholder="Start collaborating... (Use Preview button to see formatted Markdown)"
-            className="w-full min-h-[380px] p-3 sm:p-4 md:p-5 outline-none resize-none bg-transparent text-foreground caret-foreground border-0 font-mono text-sm leading-relaxed"
+            placeholder="Type your Markdown here... Use **bold** and *italic*"
+            className="w-full min-h-[380px] p-4 outline-none resize-none bg-transparent text-foreground caret-foreground border-0 font-mono text-sm leading-relaxed"
             style={{
               fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
             }}
           />
         </div>
-      )}
+
+        {/* Preview Panel */}
+        <div className="border border-border rounded-lg bg-card shadow-sm">
+          <div className="p-3 border-b border-border bg-muted/50">
+            <h3 className="text-sm font-medium">Preview</h3>
+          </div>
+          <div 
+            ref={previewRef}
+            className="min-h-[380px] p-4 overflow-auto prose prose-sm max-w-none"
+          >
+            {text ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {text}
+              </ReactMarkdown>
+            ) : (
+              <p className="text-muted-foreground">Preview will appear here as you type...</p>
+            )}
+          </div>
+        </div>
+      </div>
 
       <footer className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 sm:gap-0 mt-4 sm:mt-5 md:mt-6">
         <WordCount text={text} />
