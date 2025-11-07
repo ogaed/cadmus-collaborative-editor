@@ -1,4 +1,3 @@
-//(updated with real-time support)
 import express from "express";
 import fs from "fs";
 import path from "path";
@@ -12,27 +11,26 @@ if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, "[]");
 
 let steps: any[] = JSON.parse(fs.readFileSync(filePath, "utf-8"));
 
-const clients: Response[] = [];
 
-function broadcastUpdate() {
-  const currentContent = getCurrentContent();
+const clients: { [key: string]: express.Response } = {};
+
+function broadcastUpdate(content: string, version: number, excludeClientId?: string) {
   const message = `data: ${JSON.stringify({
     type: 'content_update',
-    content: currentContent,
-    version: steps.length,
+    content: content,
+    version: version,
     timestamp: new Date().toISOString()
   })}\n\n`;
 
-  clients.forEach(client => {
+  Object.keys(clients).forEach(clientId => {
+    // Don't send update back to the client that made the change
+    if (clientId === excludeClientId) return;
+    
     try {
-      client.write(message);
+      clients[clientId].write(message);
     } catch (error) {
       console.log('Client disconnected, removing from broadcast list');
-     
-      const index = clients.indexOf(client);
-      if (index > -1) {
-        clients.splice(index, 1);
-      }
+      delete clients[clientId];
     }
   });
 }
@@ -50,22 +48,44 @@ router.get("/events", (req, res) => {
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': '*',
   });
+
+  // Flush the headers to establish the connection
+  res.flushHeaders();
+
+  const clientId = req.query.clientId as string || `client-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
+  // Store this client's response object
+  clients[clientId] = res;
 
   res.write(`data: ${JSON.stringify({
     type: 'connected',
     content: getCurrentContent(),
     version: steps.length,
+    clientId: clientId,
     timestamp: new Date().toISOString()
   })}\n\n`);
 
-  clients.push(res);
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'heartbeat' })}\n\n`);
+    } catch (error) {
+      clearInterval(heartbeat);
+    }
+  }, 30000);
 
   req.on('close', () => {
-    const index = clients.indexOf(res);
-    if (index > -1) {
-      clients.splice(index, 1);
-    }
+    console.log(`Client ${clientId} disconnected`);
+    clearInterval(heartbeat);
+    delete clients[clientId];
+    res.end();
+  });
+
+  req.on('error', () => {
+    console.log(`Client ${clientId} connection error`);
+    clearInterval(heartbeat);
+    delete clients[clientId];
     res.end();
   });
 });
@@ -121,7 +141,8 @@ router.post("/", (req, res) => {
     steps.push(...stepsToAdd);
     fs.writeFileSync(filePath, JSON.stringify(steps, null, 2));
     
-    broadcastUpdate();
+    // Broadcast to all clients EXCEPT the one that made the change
+    broadcastUpdate(content || getCurrentContent(), steps.length, clientId);
   }
 
   res.json({ 
@@ -130,6 +151,7 @@ router.post("/", (req, res) => {
     content: content || getCurrentContent()
   });
 });
+
 router.post("/steps", (req, res) => {
   const { steps: newSteps, version, clientId } = req.body;
 
@@ -152,7 +174,9 @@ router.post("/steps", (req, res) => {
   if (newSteps.length > 0) {
     steps.push(...newSteps);
     fs.writeFileSync(filePath, JSON.stringify(steps, null, 2));
-    broadcastUpdate();
+    
+    // Broadcast to all clients EXCEPT the one that made the change
+    broadcastUpdate(getCurrentContent(), steps.length, clientId);
   }
 
   res.json({ 
@@ -165,7 +189,7 @@ router.post("/init", (req, res) => {
   steps = [];
   fs.writeFileSync(filePath, JSON.stringify(steps, null, 2));
   
-  broadcastUpdate();
+  broadcastUpdate("", steps.length);
   
   res.json({ 
     message: "Document reset",

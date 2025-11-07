@@ -28,7 +28,7 @@ export async function saveDocumentWithRetry(item: QueueItem, currentVersion: num
         body: JSON.stringify({
           content: item.content,
           version: currentVersion,
-          clientId: item.clientId,
+          clientId: item.clientId, // Make sure this is included
         }),
       })
 

@@ -41,46 +41,55 @@ export default function Editor() {
   })
   const [isConnected, setIsConnected] = useState<boolean>(false)
   const [isUserTyping, setIsUserTyping] = useState<boolean>(false)
-  const [showPreview, setShowPreview] = useState<boolean>(false) // Toggle between edit and preview
+  const [showPreview, setShowPreview] = useState<boolean>(false)
 
   const debounceTimer = useRef<number | null>(null)
   const textRef = useRef<HTMLTextAreaElement | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const isApplyingRemoteUpdate = useRef<boolean>(false)
   const lastUserActivityRef = useRef<number>(Date.now())
+  const reconnectAttemptsRef = useRef<number>(0)
 
-  // Real-time updates with Server-Sent Events
   useEffect(() => {
+    const maxReconnectDelay = 10000;
+
     const setupEventSource = () => {
       try {
-        eventSourceRef.current = new EventSource(`${API_BASE}/collab/events`);
+        // Include clientId in the SSE URL to avoid sending updates back to sender
+        const clientId = localClientId();
+        eventSourceRef.current = new EventSource(`${API_BASE}/collab/events?clientId=${clientId}`);
         
         eventSourceRef.current.onopen = () => {
           console.log('SSE connection opened');
           setIsConnected(true);
           setStatusMessage("Connected - real-time updates active");
+          reconnectAttemptsRef.current = 0;
         };
 
         eventSourceRef.current.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
             
+            // Ignore heartbeat messages
+            if (data.type === 'heartbeat') return;
+            
             if (data.type === 'content_update' || data.type === 'connected') {
               const now = Date.now();
               const timeSinceLastActivity = now - lastUserActivityRef.current;
               
+              // Don't apply updates if user is actively typing or we're applying changes
               if (isApplyingRemoteUpdate.current || 
                   isUserTyping || 
-                  timeSinceLastActivity < 2000 || 
-                  document.activeElement === textRef.current ||
-                  pendingQueue.length > 0) {
+                  timeSinceLastActivity < 1000 || 
+                  document.activeElement === textRef.current) {
                 console.log('Skipping remote update - user is active');
                 return;
               }
               
               console.log('Received remote update:', data);
               
-              if (data.content !== text) {
+              // Only update if the content is different and version is newer
+              if (data.content !== text && data.version >= serverVersion) {
                 isApplyingRemoteUpdate.current = true;
                 setText(data.content);
                 setServerVersion(data.version);
@@ -100,19 +109,32 @@ export default function Editor() {
         eventSourceRef.current.onerror = (error) => {
           console.error('SSE error:', error);
           setIsConnected(false);
-          setStatusMessage("Connection lost - reconnecting...");
           
+          // Calculate reconnect delay with exponential backoff
+          const reconnectDelay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), maxReconnectDelay);
+          reconnectAttemptsRef.current++;
+          
+          setStatusMessage(`Connection lost - reconnecting in ${reconnectDelay/1000}s...`);
+          
+          // Close current connection
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+          }
+          
+          // Attempt to reconnect after delay
           setTimeout(() => {
-            if (eventSourceRef.current) {
-              eventSourceRef.current.close();
-            }
             setupEventSource();
-          }, 3000);
+          }, reconnectDelay);
         };
 
       } catch (error) {
         console.error('Failed to setup SSE:', error);
         setStatusMessage("Real-time updates unavailable");
+        
+        // Retry connection after error
+        setTimeout(() => {
+          setupEventSource();
+        }, 3000);
       }
     };
 
@@ -123,7 +145,7 @@ export default function Editor() {
         eventSourceRef.current.close();
       }
     };
-  }, [text, pendingQueue.length, isUserTyping]);
+  }, [text, serverVersion, isUserTyping]);
 
   // Load remote document on mount
   useEffect(() => {
@@ -289,7 +311,7 @@ export default function Editor() {
     <div className="p-4 sm:p-5 md:p-6 lg:p-8 max-w-4xl mx-auto min-h-screen">
       <header className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 mb-4 sm:mb-5 md:mb-6">
         <h2 className="text-xl sm:text-2xl font-semibold m-0 text-foreground">
-        Cadmus — Collaborative Editor
+          Cadmus — Collaborative Editor
           <span className={`ml-2 text-sm ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
             {isConnected ? '●' : '●'} {isConnected ? 'Connected' : 'Disconnected'}
           </span>
